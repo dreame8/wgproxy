@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +27,9 @@
 #define CLIENT_STATE_NONE           0
 #define CLIENT_STATE_AUTH           1
 #define CLIENT_STATE_NORMAL         2
+
+#define STOP_SIGNAL1                SIGINT
+#define STOP_SIGNAL2                SIGTERM
 
 #define TRACE(sa, format, ...)                                                          \
     do {                                                                                \
@@ -368,6 +372,18 @@ static void scupreceive(struct servercontext* sc, struct clientcontext* cc)
     }
 }
 
+static int scstopped = 0;
+
+static void scstop(int signo)
+{
+    switch (signo) {
+    case STOP_SIGNAL1:
+    case STOP_SIGNAL2:
+        scstopped = 1;
+        break;
+    }
+}
+
 static int scrun(struct servercontext* sc)
 {
     struct pollfd           fds[1 + SERVER_MAX_CLIENTS];
@@ -376,7 +392,10 @@ static int scrun(struct servercontext* sc)
     struct clientcontext*   cc;
     struct clientcontext*   ccend = sc->cc + SERVER_MAX_CLIENTS;
 
-    for (;;) {
+    signal(STOP_SIGNAL1, &scstop);
+    signal(STOP_SIGNAL2, &scstop);
+
+    while (!scstopped) {
         fdend = fds;
         setpollfd(fdend++, sc->fd);
         for (cc = sc->cc; cc != ccend; ++cc) {
@@ -388,7 +407,7 @@ static int scrun(struct servercontext* sc)
         if (poll(fds, fdend - fds, -1) == -1) {
             perror("poll");
             if (errno == EINTR) {
-                break;
+                continue;
             }
             return -1;
         }
