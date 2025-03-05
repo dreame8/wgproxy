@@ -178,6 +178,8 @@ static struct servercontext* scinit(const struct args* args)
 
     memcpy(&sc->upstream, &args->upstream, sizeof(struct sockaddr_in));
 
+    TRACE(&args->listen, "* LISTEN");
+
     return sc;
 }
 
@@ -266,7 +268,7 @@ static int ccreset(struct clientcontext* cc, const struct sockaddr_in* sa)
     return 0;
 }
 
-static void scdnreceive(struct servercontext* sc)
+static void screceive(struct servercontext* sc)
 {
     char                    msg[1500];
     ssize_t                 msglen;
@@ -329,7 +331,7 @@ static void scdnreceive(struct servercontext* sc)
     }
 }
 
-static void scupreceive(struct servercontext* sc, struct clientcontext* cc)
+static void ccreceive(struct servercontext* sc, struct clientcontext* cc)
 {
     char                    msg[1500];
     ssize_t                 msglen;
@@ -372,6 +374,49 @@ static void scupreceive(struct servercontext* sc, struct clientcontext* cc)
     }
 }
 
+static int scpoll(struct servercontext* sc)
+{
+    struct pollfd           fds[1 + SERVER_MAX_CLIENTS];
+    struct pollfd*          fd;
+    struct pollfd*          fdend = fds;
+    struct clientcontext*   cc;
+    struct clientcontext*   ccend = sc->cc + SERVER_MAX_CLIENTS;
+
+    setpollfd(fdend++, sc->fd);
+    for (cc = sc->cc; cc != ccend; ++cc) {
+        if (cc->fd != -1) {
+            setpollfd(fdend++, cc->fd);
+        }
+    }
+
+    if (poll(fds, fdend - fds, -1) == -1) {
+        perror("poll");
+        if (errno == EINTR) {
+            return 0;
+        }
+        return -1;
+    }
+
+    cc = sc->cc;
+    for (fd = fds; fd != fdend; ++fd) {
+        if (!(fd->revents & POLLIN)) {
+            continue;
+        }
+        if (fd->fd == sc->fd) {
+            screceive(sc);
+            continue;
+        }
+        for (; cc != ccend; ++cc) {
+            if (cc->fd == fd->fd) {
+                ccreceive(sc, cc);
+                break;
+            }
+        }
+    }
+
+    return 0;
+}
+
 static int scstopped = 0;
 
 static void scstop(int signo)
@@ -386,46 +431,12 @@ static void scstop(int signo)
 
 static int scrun(struct servercontext* sc)
 {
-    struct pollfd           fds[1 + SERVER_MAX_CLIENTS];
-    struct pollfd*          fd;
-    struct pollfd*          fdend;
-    struct clientcontext*   cc;
-    struct clientcontext*   ccend = sc->cc + SERVER_MAX_CLIENTS;
-
     signal(STOP_SIGNAL1, &scstop);
     signal(STOP_SIGNAL2, &scstop);
 
     while (!scstopped) {
-        fdend = fds;
-        setpollfd(fdend++, sc->fd);
-        for (cc = sc->cc; cc != ccend; ++cc) {
-            if (cc->fd != -1) {
-                setpollfd(fdend++, cc->fd);
-            }
-        }
-
-        if (poll(fds, fdend - fds, -1) == -1) {
-            perror("poll");
-            if (errno == EINTR) {
-                continue;
-            }
+        if (scpoll(sc) == -1) {
             return -1;
-        }
-
-        cc = sc->cc;
-        for (fd = fds; fd != fdend; ++fd) {
-            if (fd->revents & POLLIN) {
-                if (fd->fd == sc->fd) {
-                    scdnreceive(sc);
-                } else {
-                    for (; cc != ccend; ++cc) {
-                        if (cc->fd == fd->fd) {
-                            scupreceive(sc, cc);
-                            break;
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -496,7 +507,6 @@ int main(int argc, char** argv)
 
     sc = scinit(&args);
     if (sc) {
-        TRACE(&args.listen, "* LISTEN");
         rv = scrun(sc);
         sccleanup(sc);
     }
